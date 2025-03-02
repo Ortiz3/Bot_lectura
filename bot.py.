@@ -1,0 +1,79 @@
+import requests
+import pandas as pd
+import numpy as np
+import time
+from datetime import datetime
+
+def obtener_datos_coingecko(monedas):
+    datos = {}
+    for moneda in monedas:
+        url = f"https://api.coingecko.com/api/v3/coins/{moneda}/market_chart?vs_currency=usd&days=2"
+        response = requests.get(url).json()
+        
+        if 'prices' not in response:
+            print(f"Error: La API no devolvió datos válidos para {moneda}.")
+            continue
+        
+        precios = response['prices']
+        df = pd.DataFrame(precios, columns=['timestamp', 'price'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df.resample('15min').ffill()
+        datos[moneda] = df
+    return datos
+
+def calcular_medias(df):
+    if df.empty:
+        return df
+    df['SMA_34'] = df['price'].rolling(window=34).mean()
+    df['EMA_8'] = df['price'].ewm(span=8, adjust=False).mean()
+    df['WMA_8'] = df['price'].rolling(window=8).apply(lambda x: np.dot(x, np.arange(1, 9)) / np.sum(np.arange(1, 9)), raw=True)
+    return df
+
+def detectar_senales(df):
+    if df.empty:
+        return df
+    df['Cruce_Alcista'] = (df['EMA_8'] > df['SMA_34']) & (df['EMA_8'].shift(1) <= df['SMA_34'].shift(1))
+    df['Cruce_Bajista'] = (df['EMA_8'] < df['SMA_34']) & (df['EMA_8'].shift(1) >= df['SMA_34'].shift(1))
+    df['Cambio_Alcista'] = (df['WMA_8'] > df['EMA_8']) & (df['EMA_8'] > df['SMA_34']) & (df['WMA_8'].shift(1) <= df['EMA_8'].shift(1))
+    df['Cambio_Bajista'] = (df['WMA_8'] < df['EMA_8']) & (df['EMA_8'] < df['SMA_34']) & (df['WMA_8'].shift(1) >= df['EMA_8'].shift(1))
+    return df
+
+def enviar_telegram(mensaje):
+    TOKEN = "7922123077:AAH0DY1GRI4K6Woe-BbMpzBdc5Vk1e6aoZM"
+    CHAT_ID = "5545588818"
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    params = {"chat_id": CHAT_ID, "text": mensaje}
+    requests.get(url, params=params)
+
+def verificar_y_enviar_senales(df, moneda):
+    if df.empty:
+        print(f"No hay datos para procesar en {moneda}.")
+        return
+    
+    ultima_fila = df.iloc[-1]
+    if ultima_fila['Cruce_Alcista']:
+        enviar_telegram(f"🚀 {moneda.upper()} Cruce alcista detectado a {ultima_fila.name}: {ultima_fila['price']}")
+    if ultima_fila['Cruce_Bajista']:
+        enviar_telegram(f"🔻 {moneda.upper()} Cruce bajista detectado a {ultima_fila.name}: {ultima_fila['price']}")
+    if ultima_fila['Cambio_Alcista']:
+        enviar_telegram(f"📈 {moneda.upper()} Cambio alcista detectado a {ultima_fila.name}: {ultima_fila['price']}")
+    if ultima_fila['Cambio_Bajista']:
+        enviar_telegram(f"📉 {moneda.upper()} Cambio bajista detectado a {ultima_fila.name}: {ultima_fila['price']}")
+
+# Lista de criptomonedas a monitorear
+monedas = ["bitcoin", "ethereum", "cardano","litecoin"]
+
+# Bucle infinito para ejecutar en cada vela de 15 minutos
+ultima_vela = None
+while True:
+    ahora = datetime.utcnow()
+    if ahora.minute % 15 == 0 and (ultima_vela is None or ultima_vela != ahora):
+        datos = obtener_datos_coingecko(monedas)
+        for moneda, df in datos.items():
+            df = calcular_medias(df)
+            df = detectar_senales(df)
+            verificar_y_enviar_senales(df, moneda)
+        ultima_vela = ahora
+    
+    time.sleep(60)  # Esperar 60 segundos antes de la próxima verificación
